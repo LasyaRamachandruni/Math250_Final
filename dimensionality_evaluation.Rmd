@@ -1,0 +1,117 @@
+
+---
+title: "Dimensionality Reduction and Evaluation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libraries
+
+```{r}
+install.packages(c("Rtsne", "umap", "dimRed", "ggplot2", "dplyr", "cluster", "clusterCrit"))
+library(Rtsne)
+library(umap)
+library(dimRed)
+library(ggplot2)
+library(dplyr)
+library(cluster)
+library(clusterCrit)
+```
+
+## Prepare Data
+
+```{r}
+non_features <- c("userId", "id", "gender", "sport")
+features <- newd %>% select(-all_of(non_features))
+features_scaled <- scale(features)
+labels <- newd$sport
+k <- length(unique(labels))  # Number of clusters = unique sports
+```
+
+## Helper Functions
+
+```{r}
+plot_embedding <- function(embedding, labels, title) {
+  data_df <- as.data.frame(embedding)
+  colnames(data_df) <- c("Dim1", "Dim2")
+  data_df$Sport <- labels
+  ggplot(data_df, aes(x = Dim1, y = Dim2, color = Sport)) +
+    geom_point(alpha = 0.7) +
+    labs(title = title) +
+    theme_minimal()
+}
+
+evaluate_embedding <- function(embedding, labels, method_label) {
+  km <- kmeans(embedding, centers = k, nstart = 10)
+  sil <- silhouette(km$cluster, dist(embedding))
+  sil_score <- mean(sil[, 3])
+  db_index <- intCriteria(as.matrix(embedding), as.integer(km$cluster), "Davies_Bouldin")$davies_bouldin
+
+  cat(method_label, "\n")
+  cat("  Silhouette Score:", round(sil_score, 4), "\n")
+  cat("  Davies-Bouldin Index:", round(db_index, 4), "\n\n")
+
+  print(plot_embedding(embedding, labels, method_label))
+
+  return(data.frame(Method = method_label, Silhouette = sil_score, DBI = db_index))
+}
+```
+
+## Dimensionality Reduction and Evaluation
+
+```{r}
+results <- list()
+
+# t-SNE
+perplexities <- c(10, 30, 50)
+for (p in perplexities) {
+  cat("Running t-SNE with perplexity =", p, "\n")
+  idx <- !duplicated(features_scaled)
+  feat <- features_scaled[idx, ]
+  lab <- labels[idx]
+  set.seed(42)
+  tsne_out <- Rtsne(feat, dims = 2, perplexity = p)
+  results[[paste0("tSNE_p", p)]] <- evaluate_embedding(tsne_out$Y, lab, paste("t-SNE (perplexity=", p, ")"))
+}
+
+# UMAP
+umap_configs <- expand.grid(n_neighbors = c(5, 15, 30), min_dist = c(0.1, 0.5))
+for (i in 1:nrow(umap_configs)) {
+  config <- umap_configs[i, ]
+  method_name <- paste0("UMAP (nn=", config$n_neighbors, ", md=", config$min_dist, ")")
+  cat("Running", method_name, "\n")
+  umap_out <- umap(features_scaled, config = umap.defaults %>%
+                     modifyList(list(n_neighbors = config$n_neighbors, min_dist = config$min_dist)))
+  results[[method_name]] <- evaluate_embedding(umap_out$layout, labels, method_name)
+}
+
+# dimRed methods
+methods <- list(
+  Isomap = list(),
+  MDS = list(),
+  LLE = list(k = 12),
+  SpectralEmbedding = list()
+)
+
+for (method in names(methods)) {
+  cat("Running", method, "\n")
+  red_obj <- new("dimRedData", data = as.data.frame(features_scaled))
+  embed_result <- embed(red_obj, method = method, .mute = TRUE)
+  coords <- embed_result@data@data
+  results[[method]] <- evaluate_embedding(coords, labels, method)
+}
+```
+
+## Results Summary
+
+```{r}
+results_df <- do.call(rbind, results)
+results_df <- results_df %>%
+  arrange(desc(Silhouette)) %>%
+  mutate(Rank = row_number())
+
+print(results_df)
+```
